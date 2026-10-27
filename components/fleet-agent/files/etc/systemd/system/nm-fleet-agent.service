@@ -1,0 +1,11 @@
+[Unit]
+Description=Netmatters fleet agent: install approved releases
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/netmatters/fleet-agent/bin/nm-fleet-agent --timer
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=3600

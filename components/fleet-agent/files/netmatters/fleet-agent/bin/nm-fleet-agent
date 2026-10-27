@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# nm-fleet-agent: installs Netmatters releases on this server.
+#
+# Every 15 minutes (systemd timer) it reads the latest release number from
+# the public GitHub release repository. Only when that is higher than the
+# installed release does it ask n8n whether this server may install it yet
+# (rollout order, pause). It then downloads the release tarball from GitHub
+# and installs it only if its SHA-256 matches BOTH the checksum published
+# with the GitHub release AND the checksum approved in n8n. Every outcome is
+# reported back to n8n. Once a day it also checks in with n8n even when
+# there is nothing new, so a stopped agent shows up on the status page.
+#
+# Settings come only from /netmatters/fleet-agent/fleet-agent.conf (root-owned,
+# written by hand when the server is bootstrapped, never by a release):
+#   N8N_BASE=https://n8n.example.co.uk
+#   GITHUB_REPO=org/repo
+#   FLEET_TOKEN=...                 # header auth for the n8n webhooks
+#   GITHUB_BRANCH=main              # optional
+#   FLEET_SKIP_COMPONENTS="a b"     # optional, components never to apply here
+#
+# Usage:
+#   nm-fleet-agent            # check now, honouring the "check again after" time
+#   nm-fleet-agent --now      # check now and ignore the "check again after" time
+#   nm-fleet-agent --timer    # as run by the timer: random 0-5 minute delay first
+#   nm-fleet-agent --status   # show what's installed and when it next asks n8n
+#
+# The FLEET_* environment overrides below exist for testing only.
+
+set -u -o pipefail
+
+AGENT_VERSION="1.0.0"
+
+HOME_DIR="${FLEET_HOME:-/netmatters/fleet-agent}"
+CONF="${FLEET_CONF:-$HOME_DIR/fleet-agent.conf}"
+STATE_DIR="${FLEET_STATE_DIR:-$HOME_DIR/state}"
+APPLY_ROOT="${FLEET_APPLY_ROOT:-/}"
+CRON_DIR="${FLEET_CRON_DIR:-/etc/cron.d}"
+LOCK_FILE="${FLEET_LOCK_FILE:-/run/nm-fleet-agent.lock}"
+GITHUB_RAW="${FLEET_GITHUB_RAW:-https://raw.githubusercontent.com}"
+GITHUB_DL="${FLEET_GITHUB_DL:-https://github.com}"
+CURL_PROTO="${FLEET_CURL_PROTO:-=https}"
+TEST_MODE="${FLEET_TEST:-0}"
+
+HEARTBEAT_SECONDS=86400
+RETRY_AFTER_FAILURE=3600
+KEEP_RELEASES=3
+
+log() {
+  printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/agent.log"
+  [ -t 1 ] && printf '%s\n' "$*"
+  return 0
+}
+
+die() { log "ERROR: $*"; exit 1; }
+
+is_int() { [[ "${1:-}" =~ ^[0-9]+$ ]]; }
+
+fetch() { curl -fsSL --proto "$CURL_PROTO" --proto-redir "$CURL_PROTO" --max-time 120 --retry 2 "$@"; }
+
+n8n_post() {
+  local path="$1"; shift
+  curl -fsS --proto "$CURL_PROTO" --max-time 30 --retry 2 -X POST \
+    -H "X-Fleet-Token: $FLEET_TOKEN" "$@" "$N8N_BASE/webhook/$path"
+}
+
+# Root runs code and reads the token from these, so only root may change them
+root_only() {
+  local p owner mode
+  for p in "$@"; do
+    owner="$(stat -c '%u' "$p")"; mode="$(stat -c '%a' "$p")"
+    [ "$owner" = "0" ] || die "$p must be owned by root"
+    (( (8#$mode & 8#022) == 0 )) || die "$p must not be group or world writable"
+  done
+}
+
+load_config() {
+  [ -r "$CONF" ] || die "$CONF not found - bootstrap this server first"
+  [ "$TEST_MODE" = "1" ] || root_only /netmatters "$HOME_DIR" "$HOME_DIR/bin" "$CONF"
+  N8N_BASE="" GITHUB_REPO="" FLEET_TOKEN="" GITHUB_BRANCH="main" FLEET_SKIP_COMPONENTS=""
+  # shellcheck disable=SC1090
+  . "$CONF"
+  N8N_BASE="${N8N_BASE%/}"
+  [[ "$N8N_BASE" =~ ^https?://[^[:space:]]+$ ]] || die "N8N_BASE is missing or invalid in $CONF"
+  [[ "$GITHUB_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "GITHUB_REPO is missing or invalid in $CONF"
+  [[ "$GITHUB_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || die "GITHUB_BRANCH is invalid in $CONF"
+  [ -n "$FLEET_TOKEN" ] || die "FLEET_TOKEN is missing in $CONF"
+}
+
+installed_release() {
+  local v
+  v="$(cat "$STATE_DIR/installed" 2>/dev/null | tr -d '[:space:]')"
+  is_int "$v" && echo "$v" || echo 0
+}
+
+# Sends the outcome of an install attempt to n8n. Never fails the run.
+report() {
+  local status="$1" release="$2" message="$3" logfile="${4:-}" tail=""
+  [ -n "$logfile" ] && [ -f "$logfile" ] && tail="$(tail -n 40 "$logfile" | tail -c 4000)"
+  log "Reporting $status for release $release: $message"
+  n8n_post fleet-agent-report \
+    --data-urlencode "hostname=$(hostname)" \
+    --data-urlencode "fqdn=$(hostname -f 2>/dev/null || hostname)" \
+    --data-urlencode "release=$release" \
+    --data-urlencode "status=$status" \
+    --data-urlencode "installed=$(installed_release)" \
+    --data-urlencode "agent_version=$AGENT_VERSION" \
+    --data-urlencode "message=$message" \
+    --data-urlencode "log_tail=$tail" >/dev/null 2>&1 || log "Could not send the report to n8n"
+}
+
+# Don't ask n8n about this candidate again until the given time
+set_next_check() { printf '%s %s\n' "$1" "$2" > "$STATE_DIR/next_check"; }
+
+apply_release() {
+  local rel="$1" root="$2" logfile="$3"
+  local comp name rc f base
+  local -a crons=()
+  local skip=" ${FLEET_SKIP_COMPONENTS:-} "
+
+  for comp in "$root"/components/*/; do
+    [ -d "$comp" ] || continue
+    comp="${comp%/}"; name="$(basename "$comp")"
+    [[ "$name" =~ ^[a-z0-9-]+$ ]] || { log "Invalid component name: $name"; return 1; }
+    if [[ "$skip" == *" $name "* ]]; then
+      log "Skipping $name (FLEET_SKIP_COMPONENTS)"; continue
+    fi
+
+    # applies.sh decides whether this component belongs on this server
+    if [ -f "$comp/applies.sh" ]; then
+      ( cd "$comp" && APPLY_ROOT="$APPLY_ROOT" FLEET_CONF="$CONF" timeout 60 bash ./applies.sh ) >> "$logfile" 2>&1
+      rc=$?
+      if [ "$rc" -ne 0 ]; then
+        log "Component $name does not apply here, skipping"; echo "== $name: not applicable" >> "$logfile"; continue
+      fi
+    fi
+    echo "== $name: applying" >> "$logfile"
+
+    # Files land at the same paths under /, owned by root. Existing
+    # directories keep their own owner and mode.
+    if [ -d "$comp/files" ]; then
+      if ! ( cd "$comp/files" && tar -cf - . ) | tar -xf - -C "$APPLY_ROOT" --no-same-owner --no-overwrite-dir --touch >> "$logfile" 2>&1; then
+        log "Copying files for $name failed"; return 1
+      fi
+    fi
+
+    if [ -f "$comp/install.sh" ]; then
+      ( cd "$comp" && RELEASE="$rel" COMPONENT="$name" APPLY_ROOT="$APPLY_ROOT" FLEET_CONF="$CONF" FLEET_TEST="$TEST_MODE" \
+          timeout 600 bash ./install.sh ) >> "$logfile" 2>&1
+      rc=$?
+      [ "$rc" -eq 0 ] || { log "install.sh for $name failed (exit $rc)"; return 1; }
+    fi
+
+    if [ -d "$comp/cron" ]; then
+      for f in "$comp"/cron/*; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f")"
+        # cron skips files with dots or other characters in the name
+        [[ "$base" =~ ^[a-z0-9-]+$ ]] || { log "Invalid cron file name in $name: $base"; return 1; }
+        if [ "$TEST_MODE" = "1" ]; then
+          install -m 0644 "$f" "$CRON_DIR/netmatters-$base"
+        else
+          install -o root -g root -m 0644 "$f" "$CRON_DIR/netmatters-$base"
+        fi || { log "Installing cron $base failed"; return 1; }
+        crons+=("netmatters-$base")
+      done
+    fi
+  done
+
+  # Everything applied: drop any of our cron files this release no longer has
+  for f in "$CRON_DIR"/netmatters-*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    if ! printf '%s\n' "${crons[@]+"${crons[@]}"}" | grep -qxF "$base"; then
+      rm -f "$f" && log "Removed cron $base (not in release $rel)"
+    fi
+  done
+  return 0
+}
+
+install_release() {
+  local rel="$1" approved="$2" installed="$3"
+  local work="$STATE_DIR/releases/$rel.tmp" final="$STATE_DIR/releases/$rel"
+  local logfile="$STATE_DIR/logs/release-$rel.log"
+  local name="release-$rel.tar" gh_sum actual inner now
+
+  now="$(date +%s)"
+  : > "$logfile"
+  rm -rf "$work"; mkdir -p "$work/unpacked"
+  log "Installing release $rel"
+
+  if ! fetch -o "$work/$name" "$GITHUB_DL/$GITHUB_REPO/releases/download/r$rel/$name" 2>>"$logfile" ||
+     ! gh_sum="$(fetch "$GITHUB_DL/$GITHUB_REPO/releases/download/r$rel/$name.sha256" 2>>"$logfile" | awk 'NR==1 {print tolower($1)}')" ||
+     [ -z "$gh_sum" ]; then
+    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
+    report error "$rel" "Could not download release $rel from GitHub" "$logfile"; return 1
+  fi
+
+  actual="$(sha256sum "$work/$name" | awk '{print $1}')"
+  {
+    echo "tarball sha256: $actual"
+    echo "github sha256:  ${gh_sum:-none}"
+    echo "n8n sha256:     $approved"
+  } >> "$logfile"
+  if [ "$actual" != "$gh_sum" ] || [ "$actual" != "$approved" ]; then
+    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
+    report mismatch "$rel" "Checksums do not match (tarball $actual, GitHub ${gh_sum:-none}, n8n $approved). Nothing installed." "$logfile"
+    return 1
+  fi
+
+  if ! tar -xf "$work/$name" -C "$work/unpacked" --no-same-owner >> "$logfile" 2>&1; then
+    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
+    report failed "$rel" "Could not unpack release $rel" "$logfile"; return 1
+  fi
+
+  inner="$(sed -n 's/.*"release"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$work/unpacked/release.json" 2>/dev/null | head -1)"
+  if [ "$inner" != "$rel" ]; then
+    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
+    report mismatch "$rel" "release.json says release '${inner:-none}', expected $rel. Nothing installed." "$logfile"; return 1
+  fi
+
+  rm -rf "$final"; mv "$work/unpacked" "$final"; rm -rf "$work"
+
+  if ! apply_release "$rel" "$final" "$logfile"; then
+    set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
+    report failed "$rel" "Release $rel failed to apply on top of release $installed. Still on $installed." "$logfile"; return 1
+  fi
+
+  echo "$rel" > "$STATE_DIR/installed"
+  rm -f "$STATE_DIR/next_check"
+
+  # Keep the newest few unpacked releases for investigation
+  ls -1 "$STATE_DIR/releases" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | head -n -"$KEEP_RELEASES" |
+    while read -r old; do rm -rf "${STATE_DIR:?}/releases/$old"; done
+
+  report success "$rel" "Release $rel installed (was $installed)" "$logfile"
+  return 0
+}
+
+show_status() {
+  echo "Agent version:     $AGENT_VERSION"
+  echo "Installed release: $(installed_release)"
+  if [ -f "$STATE_DIR/next_check" ]; then
+    read -r cand when < "$STATE_DIR/next_check"
+    echo "Waiting on:        release $cand, next ask $(date -d "@$when" 2>/dev/null || echo "$when")"
+  fi
+  [ -f "$STATE_DIR/last_heartbeat" ] && echo "Last check-in:     $(date -d "@$(cat "$STATE_DIR/last_heartbeat")" 2>/dev/null)"
+  return 0
+}
+
+main() {
+  local force=0 timer=0
+  case "${1:-}" in
+    --now) force=1 ;;
+    --timer) timer=1 ;;
+    --status) mkdir -p "$STATE_DIR"; show_status; return 0 ;;
+    "") ;;
+    *) echo "Usage: nm-fleet-agent [--now|--timer|--status]" >&2; return 2 ;;
+  esac
+
+  if [ "$TEST_MODE" != "1" ] && [ "$(id -u)" -ne 0 ]; then
+    echo "nm-fleet-agent must run as root." >&2; return 1
+  fi
+  mkdir -p "$STATE_DIR/releases" "$STATE_DIR/logs"
+  chmod 0700 "$STATE_DIR"
+
+  # Spread the estate's checks across 5 minutes. Done here rather than with
+  # systemd's RandomizedDelaySec, which older systemd (CentOS 7) ignores.
+  [ "$timer" = "1" ] && sleep $((RANDOM % 300))
+
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || { log "Another run is in progress"; return 0; }
+
+  load_config
+
+  local installed latest now hb_due=0 last_hb cand when resp
+  local action="" rel="" sum="" again="" msg="" k v
+  installed="$(installed_release)"
+  now="$(date +%s)"
+
+  latest="$(fetch "$GITHUB_RAW/$GITHUB_REPO/$GITHUB_BRANCH/LATEST" 2>/dev/null | tr -d '[:space:]')"
+  is_int "$latest" || die "Could not read the latest release number from GitHub"
+
+  last_hb="$(cat "$STATE_DIR/last_heartbeat" 2>/dev/null)"
+  is_int "$last_hb" || last_hb=0
+  [ $((now - last_hb)) -ge "$HEARTBEAT_SECONDS" ] && hb_due=1
+
+  if [ "$latest" -le "$installed" ] && [ "$hb_due" = "0" ]; then
+    return 0
+  fi
+
+  # Waiting on a later rollout step, or backing off after a failure
+  if [ "$latest" -gt "$installed" ] && [ "$hb_due" = "0" ] && [ "$force" = "0" ] && [ -f "$STATE_DIR/next_check" ]; then
+    read -r cand when < "$STATE_DIR/next_check"
+    if [ "$cand" = "$latest" ] && is_int "$when" && [ "$now" -lt "$when" ]; then
+      return 0
+    fi
+  fi
+
+  if ! resp="$(n8n_post fleet-agent-check \
+        --data-urlencode "hostname=$(hostname)" \
+        --data-urlencode "fqdn=$(hostname -f 2>/dev/null || hostname)" \
+        --data-urlencode "installed=$installed" \
+        --data-urlencode "candidate=$latest" \
+        --data-urlencode "agent_version=$AGENT_VERSION" 2>/dev/null)"; then
+    die "Could not reach n8n at $N8N_BASE"
+  fi
+  echo "$now" > "$STATE_DIR/last_heartbeat"
+
+  # The reply is plain key=value lines, so no JSON parser is needed
+  while IFS='=' read -r k v; do
+    v="${v%$'\r'}"
+    case "$k" in
+      action) action="$v" ;;
+      release) rel="$v" ;;
+      sha256) sum="$(printf '%s' "$v" | tr 'A-F' 'a-f')" ;;
+      check_again_after) again="$v" ;;
+      message) msg="$v" ;;
+    esac
+  done <<< "$resp"
+  is_int "$again" || again=$((now + 900))
+
+  case "$action" in
+    none)
+      return 0 ;;
+    wait|paused)
+      log "n8n says $action for release $latest: $msg"
+      set_next_check "$latest" "$again"
+      return 0 ;;
+    install)
+      if ! is_int "$rel" || [ "$rel" -le "$installed" ] || [ "$rel" -gt "$latest" ]; then
+        set_next_check "$latest" $((now + RETRY_AFTER_FAILURE))
+        report refused "${rel:-0}" "n8n offered release '${rel}', which is not newer than installed $installed and no newer than GitHub's latest $latest. Refused."
+        return 1
+      fi
+      if ! [[ "$sum" =~ ^[0-9a-f]{64}$ ]]; then
+        set_next_check "$latest" $((now + RETRY_AFTER_FAILURE))
+        report refused "$rel" "n8n did not send a valid approved checksum for release $rel. Refused."
+        return 1
+      fi
+      install_release "$rel" "$sum" "$installed"
+      return $? ;;
+    *)
+      die "Unexpected reply from n8n: ${resp:0:200}" ;;
+  esac
+}
+
+# Kept on one line so a self-update that replaces this file mid-run is safe
+main "$@"; exit $?

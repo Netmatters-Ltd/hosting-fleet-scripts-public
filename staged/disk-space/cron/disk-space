@@ -1,0 +1,2 @@
+# Monthly per-account disk usage for disk space billing (see nm-run)
+0 2 * * * root /netmatters/fleet-agent/bin/nm-run --name disk-space --monthly --spread 14400 -- /netmatters/disk-space/report-disk-space.sh

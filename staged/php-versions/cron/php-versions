@@ -1,0 +1,2 @@
+# Daily installed PHP versions for the PHP Version Matrix (see nm-run)
+0 4 * * * root /netmatters/fleet-agent/bin/nm-run --name php-versions --daily --spread 7200 -- /netmatters/php-audit/report-php-versions.sh

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# nm-run: runs a scheduled job at a time that's fixed for this server but
+# different from server to server, so the estate doesn't all report at once.
+#
+# Release cron files are the same on every server, so they run nm-run at a
+# fixed time each day and nm-run decides whether today is this server's day,
+# then waits a server-specific delay before starting the job. Both are worked
+# out from the hostname and the job name, so they never change between runs.
+#
+# Usage (from a cron file):
+#   nm-run --name NAME [--daily|--weekly|--twice-monthly|--monthly] [--spread SECONDS] -- command [args...]
+#
+#   --daily          every day (default)
+#   --weekly         one day a week
+#   --twice-monthly  two days a month, 14 days apart (days 1-28)
+#   --monthly        one day a month (days 1-28)
+#   --spread N       wait 0 to N-1 seconds before starting (default 0)
+#   --show           print this server's day and delay for the job, and exit
+#
+# Output goes to /netmatters/logs/NAME.log (last run only). Only one copy
+# of each job runs at a time.
+
+set -euo pipefail
+
+name="" every="daily" spread=0 show=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) name="${2:-}"; shift 2 ;;
+    --daily|--weekly|--twice-monthly|--monthly) every="${1#--}"; shift ;;
+    --spread) spread="${2:-0}"; shift 2 ;;
+    --show) show=1; shift ;;
+    --) shift; break ;;
+    *) echo "nm-run: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+[[ "$name" =~ ^[a-z0-9-]+$ ]] || { echo "nm-run: --name must be lower case letters, digits and dashes" >&2; exit 2; }
+[[ "$spread" =~ ^[0-9]+$ ]] || { echo "nm-run: --spread must be a number of seconds" >&2; exit 2; }
+[ "$show" = "1" ] || [ $# -gt 0 ] || { echo "nm-run: no command given after --" >&2; exit 2; }
+
+host="$(hostname -f 2>/dev/null || hostname)"
+slot() { printf '%s' "$host/$name/$1" | cksum | awk '{print $1}'; }
+day_slot="$(slot day)"
+delay=0
+[ "$spread" -gt 0 ] && delay=$(( $(slot delay) % spread ))
+
+dom=$((10#$(date +%d))); dow="$(date +%u)"
+case "$every" in
+  daily)         due=1; when="every day" ;;
+  weekly)        d=$(( day_slot % 7 + 1 )); [ "$dow" = "$d" ] && due=1 || due=0; when="weekday $d (1 = Monday)" ;;
+  twice-monthly) d=$(( day_slot % 14 + 1 )); { [ "$dom" = "$d" ] || [ "$dom" = "$((d + 14))" ]; } && due=1 || due=0; when="days $d and $((d + 14))" ;;
+  monthly)       d=$(( day_slot % 28 + 1 )); [ "$dom" = "$d" ] && due=1 || due=0; when="day $d" ;;
+esac
+
+if [ "$show" = "1" ]; then
+  echo "$name on $host: $when, ${delay}s after the cron time"
+  exit 0
+fi
+[ "$due" = "1" ] || exit 0
+
+logdir=/netmatters/logs
+mkdir -p "$logdir"
+exec 9>"/run/nm-run-$name.lock"
+flock -n 9 || { echo "$(date -u +%FT%TZ) already running, skipped" >> "$logdir/$name.log"; exit 0; }
+
+sleep "$delay"
+{
+  echo "== $(date -u +%FT%TZ) starting: $*"
+  rc=0
+  "$@" || rc=$?
+  echo "== $(date -u +%FT%TZ) finished, exit $rc"
+} > "$logdir/$name.log" 2>&1
+exit 0

@@ -1,0 +1,2 @@
+# Build output from make-release.sh; GitHub Actions builds its own
+dist/

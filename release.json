@@ -1,0 +1,4 @@
+{
+  "release": 1,
+  "notes": "First release: the fleet agent and the nm-run scheduling helper only."
+}

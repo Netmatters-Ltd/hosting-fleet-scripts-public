@@ -1,0 +1,2 @@
+# nginx sites and their PHP versions, twice a month (see nm-run)
+0 3 * * * root /netmatters/fleet-agent/bin/nm-run --name site-php-versions --twice-monthly --spread 14400 -- /netmatters/php-audit/report-site-php-versions-nginx.sh

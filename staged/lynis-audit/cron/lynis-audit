@@ -1,0 +1,2 @@
+# Monthly Lynis audit, on a day and time fixed for each server (see nm-run)
+0 1 * * * root /netmatters/fleet-agent/bin/nm-run --name lynis-audit --monthly --spread 75600 -- /netmatters/lynis/run-lynis-audit.sh
