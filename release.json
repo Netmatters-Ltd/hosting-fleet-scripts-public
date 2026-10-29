@@ -1,4 +1,4 @@
 {
-  "release": 1,
-  "notes": "First release: the fleet agent and the nm-run scheduling helper only."
+  "release": 2,
+  "notes": "Moves the existing jobs over: lynis-audit, disk-space, php-versions and site-php-versions."
 }
