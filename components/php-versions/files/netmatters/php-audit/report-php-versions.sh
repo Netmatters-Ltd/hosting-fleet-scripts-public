@@ -25,7 +25,8 @@ fpm_restarted_for() {
   local unit="$1"
   if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1 \
       && systemctl is-enabled "$unit" >/dev/null 2>&1; then
-    systemctl show "$unit" --property=ActiveEnterTimestamp --value 2>/dev/null || true
+    # --value needs systemd 230+, so cut the "Key=" off for CentOS 7
+    systemctl show "$unit" --property=ActiveEnterTimestamp 2>/dev/null | cut -d= -f2- || true
   fi
 }
 

@@ -24,10 +24,10 @@ if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload
   systemctl enable nm-fleet-agent.timer >/dev/null 2>&1
   systemctl start nm-fleet-agent.timer
-  rm -f /etc/cron.d/nm-fleet-agent-fallback
+  rm -f /etc/cron.d/nm-fleet-agent-fallback  # release-check: destructive-ok (fallback not needed once the timer runs)
 else
   # No systemd: run from cron instead. Not "netmatters-" prefixed, so the
   # agent's own cron clean-up leaves it alone.
-  printf '*/15 * * * * root /netmatters/fleet-agent/bin/nm-fleet-agent --timer >/dev/null 2>&1\n' > /etc/cron.d/nm-fleet-agent-fallback
+  printf '*/15 * * * * root /netmatters/fleet-agent/bin/nm-fleet-agent --timer >/dev/null 2>&1\n' > /etc/cron.d/nm-fleet-agent-fallback  # release-check: destructive-ok (our own fallback cron file)
   chmod 0644 /etc/cron.d/nm-fleet-agent-fallback
 fi

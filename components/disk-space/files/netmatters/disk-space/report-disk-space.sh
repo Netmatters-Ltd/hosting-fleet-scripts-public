@@ -79,7 +79,7 @@ fi
 
 # ---- Measure (sizes in MB; files vanishing mid-run aren't fatal) ----
 report="$(mktemp)"
-trap 'rm -f "$report"' EXIT
+trap 'rm -f "$report"' EXIT  # release-check: destructive-ok (mktemp file)
 nice_cmd=(nice -n 19)
 command -v ionice >/dev/null 2>&1 && nice_cmd+=(ionice -c3)
 "${nice_cmd[@]}" du -sm -- "${paths[@]}" > "$report" 2>/dev/null || true

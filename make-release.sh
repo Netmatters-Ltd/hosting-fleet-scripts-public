@@ -31,6 +31,8 @@ done
 if grep -rIlE $'\r$' release.json components >/dev/null; then
   echo "Some files have Windows line endings (CRLF). Fix them before releasing." >&2; exit 1
 fi
+# Ubuntu and CentOS safe, and nothing destructive unless marked
+bash ./check-release.sh
 
 out="${1:-dist}"
 mkdir -p "$out"
