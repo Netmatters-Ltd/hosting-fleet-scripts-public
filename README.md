@@ -16,6 +16,7 @@ Scripts, config and cron jobs installed on Netmatters-managed servers by the fle
 LATEST                 release number servers compare against
 release.json           {"release": N, "notes": "..."}; must match LATEST
 make-release.sh        reproducible build (GNU tar, Linux or WSL)
+check-release.sh       Ubuntu/CentOS and destructive-command checks, run by make-release.sh
 bootstrap.sh / .md     first-time install of the agent on a server
 components/<name>/     shipped in the next release
 staged/<name>/         ready but not shipped yet; git mv into components/ to release
@@ -52,6 +53,8 @@ echo 2 > LATEST                                      # and release.json
 # open a pull request, get it reviewed, merge, then on main:
 git tag r2 && git push origin r2
 ```
+
+`make-release.sh` runs `check-release.sh` first, which fails the build if any component would break on Ubuntu 14.04+ or CentOS 7+, or does anything destructive (deleting or overwriting files, `crontab -`, stopping or restarting services, removing packages or accounts). If a flagged line is intended, end it with `# release-check: destructive-ok (why)` or `# release-check: portable-ok (why)`, so the reviewer sees exactly what was waved through.
 
 Then approve it in n8n with the checksum from your own `./make-release.sh` run on the merged commit.
 

@@ -9,6 +9,6 @@ current="$(crontab -l 2>/dev/null || true)"
 if printf '%s\n' "$current" | grep -q 'netmatters-lynis-audit'; then
   printf '%s\n' "$current" > "/netmatters/fleet-agent/state/root-crontab.lynis.$(date +%Y%m%d%H%M%S).bak"
   # Drops the job line and Ansible's "#Ansible: netmatters-lynis-audit" comment
-  printf '%s\n' "$current" | { grep -v 'netmatters-lynis-audit' || true; } | crontab -
+  printf '%s\n' "$current" | { grep -v 'netmatters-lynis-audit' || true; } | crontab -  # release-check: destructive-ok (drops only the old Lynis job, backup taken above)
   echo "Removed the old Lynis job from root's crontab"
 fi
