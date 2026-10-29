@@ -29,12 +29,17 @@ Check it worked with `nm-fleet-agent --status`, and on the n8n Fleet Status page
 
 ## Per-server settings
 
+Keys and tokens only ever go in this file, never in the repository. Forge servers can use `recipes/forge-fleet-agent.sh` (kept outside this repository), which writes these settings and bootstraps the agent in one go.
+
 Add these to `/netmatters/fleet-agent/fleet-agent.conf` as needed. Components don't need their own webhook settings: they post to `N8N_BASE` plus a fixed path, with the fleet token.
 
 | Setting | Used by | Example |
 |---|---|---|
 | `FLEET_SKIP_COMPONENTS` | Agent | `"disk-space lynis-audit"` to never apply those components here |
 | `DISK_PATHS` | `disk-space` | `"/block_storage/home/*"` to override folder discovery |
+| `KERNELCARE_KEY` | `kernelcare` | The KernelCare licence key. The component only applies where this is set |
+| `NETDATA_CLAIM_TOKEN`, `NETDATA_CLAIM_ROOMS` | `netdata` | Netdata Cloud claim token and room ID. The component only applies where both are set |
+| `NETDATA_CLAIM_URL` | `netdata` | Optional, defaults to `https://app.netdata.cloud` |
 
 ## Useful commands
 

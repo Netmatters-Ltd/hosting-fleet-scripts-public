@@ -13,6 +13,10 @@
 #                                     something on the server
 #   # release-check: portable-ok      only runs where it's safe (guarded by
 #                                     command -v, a path check, applies.sh)
+#   # release-check: download-ok      runs code fetched at install time,
+#                                     which the release checksum doesn't cover
+# A line that needs more than one lists them all, e.g.
+#   # release-check: portable-ok, destructive-ok (why)
 #
 # Usage: ./check-release.sh
 set -uo pipefail
@@ -55,12 +59,17 @@ DESTRUCTIVE=(
   $'\\b(kill|killall|pkill)\\b\tkills processes'
   $'\\b(reboot|shutdown|halt|poweroff)\\b|\\binit[[:space:]]+[06]\\b\treboots or shuts down the server'
   $'(^|[;&|({][[:space:]]*|\\$\\([[:space:]]*|^[[:space:]]*)(userdel|groupdel|usermod|passwd|chpasswd)\\b\tchanges or removes accounts'
-  $'\\b(apt|apt-get|yum|dnf)\\b[^|;&]*\\b(remove|purge|erase|autoremove|upgrade|dist-upgrade|update)\\b|\\brpm[[:space:]]+-e\\b|\\bdpkg[[:space:]]+(-r|-P|--remove|--purge)\\b\tremoves or upgrades packages'
+  $'\\b(apt|apt-get|yum|dnf)\\b[^|;&]*[[:space:]](remove|purge|erase|autoremove|upgrade|dist-upgrade|update)\\b|\\brpm[[:space:]]+-e\\b|\\bdpkg[[:space:]]+(-r|-P|--remove|--purge)\\b\tremoves or upgrades packages'
   $'\\b(iptables|ip6tables|nft|firewall-cmd|ufw)\\b\tchanges the firewall'
   $'\\b(mkfs[.a-z0-9]*|fdisk|parted|wipefs|dd)\\b\ttouches disks or file systems'
   $'\\b(setenforce|sysctl[[:space:]]+-w)\\b\tchanges kernel or SELinux settings'
   $'\\bchattr\\b\tchanges file attributes'
   $'os\\.(remove|unlink|rmdir)\\b|shutil\\.rmtree\\b\tdeletes files (python)'
+)
+
+DOWNLOADS=(
+  $'\\b(curl|wget)\\b[^#]*\\|[[:space:]]*(sudo[[:space:]]+)?(ba|da|z)?sh\\b\tpipes a download into a shell'
+  $'\\b(curl|wget)\\b[^#]*(&&|;)[[:space:]]*(sudo[[:space:]]+)?(ba|da|z)?sh[[:space:]]\tdownloads a script and runs it'
 )
 
 fail=0
@@ -75,7 +84,7 @@ scan() {
     while IFS= read -r n; do
       line="$(sed -n "${n}p" "$file")"
       [[ "$line" =~ ^[[:space:]]*# ]] && [ "$n" != 1 ] && continue
-      [[ "$line" == *"release-check: $marker"* ]] && continue
+      [[ "$line" == *"release-check:"*"$marker"* ]] && continue
       code="$line"; [ "$n" != 1 ] && code="${line%%[[:space:]]#[[:space:]]*}"
       printf '%s\n' "$code" | grep -qE -- "$re" || continue
       problem "$file:$n: $kind: $why (mark with '# release-check: $marker' if intended)" "${line#"${line%%[![:space:]]*}"}"
@@ -101,6 +110,7 @@ for f in "${scripts[@]}"; do
   esac
   scan "$f" portable-ok portability "${PORTABILITY[@]}"
   scan "$f" destructive-ok destructive "${DESTRUCTIVE[@]}"
+  scan "$f" download-ok unchecked-download "${DOWNLOADS[@]}"
 done
 
 # Cron files: well formed, run as root, and only call scripts this release ships

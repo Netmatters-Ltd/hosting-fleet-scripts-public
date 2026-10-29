@@ -1,0 +1,2 @@
+# Daily installed packages and pending updates for patch tracking (see nm-run)
+0 1 * * * root /netmatters/fleet-agent/bin/nm-run --name patch-versions --daily --spread 21600 -- /netmatters/patches/report-patch-versions.sh
