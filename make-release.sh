@@ -41,8 +41,8 @@ name="release-$rel.tar"
 # Copy to a scratch folder and fix every mode, so permissions from the
 # checkout (umask, Windows file systems) can't change the result. Components
 # set real file modes in their install.sh.
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
+stage="$(mktemp -d /tmp/nm-make-release.XXXXXXXX)"
+trap 'rm -rf "/tmp/nm-make-release.${stage##*.}"' EXIT
 cp -R release.json components "$stage/"
 find "$stage" -type d -exec chmod 0755 {} +
 find "$stage" -type f -exec chmod 0644 {} +

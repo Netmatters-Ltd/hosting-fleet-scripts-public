@@ -1,0 +1,3 @@
+# Nightly: install Acronis if this server qualifies, otherwise report what's
+# blocking it (see install-acronis.sh). Does nothing once Acronis is installed.
+0 1 * * * root /netmatters/fleet-agent/bin/nm-run --name acronis --daily --spread 14400 -- /netmatters/acronis/install-acronis.sh

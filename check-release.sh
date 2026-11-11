@@ -113,6 +113,37 @@ for f in "${scripts[@]}"; do
   scan "$f" download-ok unchecked-download "${DOWNLOADS[@]}"
 done
 
+# rm -r / rm -rf: every path must start with a fixed folder written out in
+# full, such as "/tmp/nm-x.${work##*.}" or "/netmatters/foo/${name:?}", so an
+# empty or unset variable can never turn it into rm -rf / or rm -rf "".
+# No marker can wave this through. The repo's own tools are held to it too.
+check_rm_paths() {
+  local file="$1" n line code seg arg bad
+  while IFS= read -r n; do
+    line="$(sed -n "${n}p" "$file")"
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    code="${line%%[[:space:]]#[[:space:]]*}"
+    while IFS= read -r seg; do
+      printf '%s\n' "$seg" | grep -qE -- '[[:space:]](-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)([[:space:]]|$)' || continue
+      bad=""
+      for arg in ${seg#rm}; do
+        case "$arg" in
+          --) ;;
+          -*) ;;
+          \"/[A-Za-z0-9._-]*/*|\'/[A-Za-z0-9._-]*/*|/[A-Za-z0-9._-]*/*)
+            # the first folder must be a real name, not a variable
+            [[ "$arg" =~ ^[\"\']?/[A-Za-z0-9._-]+/ ]] || bad="$arg" ;;
+          *) bad="$arg" ;;
+        esac
+      done
+      [ -n "$bad" ] && problem "$file:$n: rm -r path must start with a fixed folder, e.g. \"/tmp/nm-x.\${work##*.}\" (found $bad)" "${line#"${line%%[![:space:]]*}"}"
+    done < <(printf '%s\n' "$code" | grep -oE '(^|[^[:alnum:]_-])rm[[:space:]][^;|&)'"'"']*' | sed -E 's/^[^r]*rm/rm/')
+  done < <(grep -nE '(^|[^[:alnum:]_-])rm[[:space:]]' "$file" | cut -d: -f1)
+}
+for f in "${scripts[@]}" make-release.sh bootstrap.sh; do
+  check_rm_paths "$f"
+done
+
 # Cron files: well formed, run as root, and only call scripts this release ships
 for f in components/*/cron/*; do
   [ -f "$f" ] || continue

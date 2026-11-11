@@ -40,6 +40,9 @@ Add these to `/netmatters/fleet-agent/fleet-agent.conf` as needed. Components do
 | `KERNELCARE_KEY` | `kernelcare` | The KernelCare licence key. The component only applies where this is set |
 | `NETDATA_CLAIM_TOKEN`, `NETDATA_CLAIM_ROOMS` | `netdata` | Netdata Cloud claim token and room ID. The component only applies where both are set |
 | `NETDATA_CLAIM_URL` | `netdata` | Optional, defaults to `https://app.netdata.cloud` |
+| `ACRONIS_TOKEN` | `acronis` | Registration token from the customer's own Acronis tenant. The component only applies where this is set, so only add it once backup has been sold for the server |
+| `ACRONIS_URL` | `acronis` | Optional, the Acronis data centre, defaults to `https://eu-cloud.acronis.com` |
+| `ACRONIS_DOWNLOAD_URL` | `acronis` | Optional, the installer link if the default one doesn't suit the tenant |
 
 ## Useful commands
 
@@ -49,4 +52,5 @@ nm-fleet-agent --now             # check now, ignoring any wait
 tail -50 /netmatters/fleet-agent/state/agent.log
 ls /netmatters/fleet-agent/state/logs/
 nm-run --name lynis-audit --monthly --show   # when a scheduled job runs on this server
+/netmatters/acronis/install-acronis.sh --check   # Acronis checks only, installs and posts nothing
 ```

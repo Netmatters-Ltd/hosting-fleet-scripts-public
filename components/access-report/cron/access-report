@@ -1,0 +1,2 @@
+# Daily users, SSH keys and sudo rights, for access tracking (see nm-run)
+0 5 * * * root /netmatters/fleet-agent/bin/nm-run --name access-report --daily --spread 7200 -- /netmatters/access/report-access.sh
