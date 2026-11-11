@@ -1,4 +1,4 @@
 {
-  "release": 3,
-  "notes": "Combining Forge recipes into one script"
+  "release": 4,
+  "notes": "Daily server access report (users, SSH keys, sudo), safer rm -rf paths in the agent and tools"
 }

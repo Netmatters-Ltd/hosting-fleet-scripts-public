@@ -28,11 +28,13 @@
 
 set -u -o pipefail
 
-AGENT_VERSION="1.0.0"
+AGENT_VERSION="1.0.1"
 
-HOME_DIR="${FLEET_HOME:-/netmatters/fleet-agent}"
+# Fixed paths: the rm -rf lines below name these folders literally, so they
+# can never act on an empty or unexpected variable
+HOME_DIR="/netmatters/fleet-agent"
 CONF="${FLEET_CONF:-$HOME_DIR/fleet-agent.conf}"
-STATE_DIR="${FLEET_STATE_DIR:-$HOME_DIR/state}"
+STATE_DIR="$HOME_DIR/state"
 APPLY_ROOT="${FLEET_APPLY_ROOT:-/}"
 CRON_DIR="${FLEET_CRON_DIR:-/etc/cron.d}"
 LOCK_FILE="${FLEET_LOCK_FILE:-/run/nm-fleet-agent.lock}"
@@ -185,13 +187,13 @@ install_release() {
 
   now="$(date +%s)"
   : > "$logfile"
-  rm -rf "$work"; mkdir -p "$work/unpacked"  # release-check: destructive-ok (agent's own work folder)
+  rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"; mkdir -p "$work/unpacked"  # release-check: destructive-ok (agent's own work folder)
   log "Installing release $rel"
 
   if ! fetch -o "$work/$name" "$GITHUB_DL/$GITHUB_REPO/releases/download/r$rel/$name" 2>>"$logfile" ||
      ! gh_sum="$(fetch "$GITHUB_DL/$GITHUB_REPO/releases/download/r$rel/$name.sha256" 2>>"$logfile" | awk 'NR==1 {print tolower($1)}')" ||
      [ -z "$gh_sum" ]; then
-    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
+    rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
     report error "$rel" "Could not download release $rel from GitHub" "$logfile"; return 1
   fi
 
@@ -202,23 +204,23 @@ install_release() {
     echo "n8n sha256:     $approved"
   } >> "$logfile"
   if [ "$actual" != "$gh_sum" ] || [ "$actual" != "$approved" ]; then
-    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
+    rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
     report mismatch "$rel" "Checksums do not match (tarball $actual, GitHub ${gh_sum:-none}, n8n $approved). Nothing installed." "$logfile"
     return 1
   fi
 
   if ! tar -xf "$work/$name" -C "$work/unpacked" --no-same-owner >> "$logfile" 2>&1; then
-    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
+    rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
     report failed "$rel" "Could not unpack release $rel" "$logfile"; return 1
   fi
 
   inner="$(sed -n 's/.*"release"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$work/unpacked/release.json" 2>/dev/null | head -1)"
   if [ "$inner" != "$rel" ]; then
-    rm -rf "$work"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
+    rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"; set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))  # release-check: destructive-ok (agent's own work folder)
     report mismatch "$rel" "release.json says release '${inner:-none}', expected $rel. Nothing installed." "$logfile"; return 1
   fi
 
-  rm -rf "$final"; mv "$work/unpacked" "$final"; rm -rf "$work"  # release-check: destructive-ok (agent's own release folders)
+  rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}"; mv "$work/unpacked" "$final"; rm -rf "/netmatters/fleet-agent/state/releases/${rel:?}.tmp"  # release-check: destructive-ok (agent's own release folders)
 
   if ! apply_release "$rel" "$final" "$logfile"; then
     set_next_check "$rel" $((now + RETRY_AFTER_FAILURE))
@@ -230,7 +232,7 @@ install_release() {
 
   # Keep the newest few unpacked releases for investigation
   ls -1 "$STATE_DIR/releases" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | head -n -"$KEEP_RELEASES" |
-    while read -r old; do rm -rf "${STATE_DIR:?}/releases/$old"; done  # release-check: destructive-ok (agent's own old releases)
+    while read -r old; do rm -rf "/netmatters/fleet-agent/state/releases/${old:?}"; done  # release-check: destructive-ok (agent's own old releases)
 
   report success "$rel" "Release $rel installed (was $installed)" "$logfile"
   return 0

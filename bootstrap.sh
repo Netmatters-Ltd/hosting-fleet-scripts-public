@@ -35,7 +35,7 @@ for cmd in curl sha256sum tar flock timeout; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "$cmd is required." >&2; exit 1; }
 done
 
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+work="$(mktemp -d /tmp/nm-fleet-bootstrap.XXXXXXXX)"; trap 'rm -rf "/tmp/nm-fleet-bootstrap.${work##*.}"' EXIT
 name="release-$rel.tar"
 base="https://github.com/$GITHUB_REPO/releases/download/r$rel"
 curl -fsSL --proto '=https' -o "$work/$name" "$base/$name"
