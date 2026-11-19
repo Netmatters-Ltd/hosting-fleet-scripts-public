@@ -1,4 +1,4 @@
 {
-  "release": 5,
-  "notes": "Agent 1.1.0: on-demand requests (Refresh packages on the Status page), patch-versions can be run on demand"
+  "release": 6,
+  "notes": "Update script management for PHP and nginx"
 }

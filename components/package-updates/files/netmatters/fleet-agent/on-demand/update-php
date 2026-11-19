@@ -1,0 +1,3 @@
+# On-demand request "update-php": upgrade this server's PHP packages with
+# nm-safe-update.sh (dry run checks, config tests, site checks, rollback).
+/netmatters/updates/nm-safe-update.sh --profile php --yes --max-sites 25
