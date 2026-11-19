@@ -10,6 +10,12 @@
 # reported back to n8n. Once a day it also checks in with n8n even when
 # there is nothing new, so a stopped agent shows up on the status page.
 #
+# On every run it also asks n8n for on-demand requests (for example "refresh
+# the package list now"). n8n only names a request; the agent runs it only if
+# a release has installed a matching definition in
+# /netmatters/fleet-agent/on-demand/<name>, so n8n can still never make a
+# server run anything GitHub and the release approval haven't put there.
+#
 # Settings come only from /netmatters/fleet-agent/fleet-agent.conf (root-owned,
 # written by hand when the server is bootstrapped, never by a release):
 #   N8N_BASE=https://n8n.example.co.uk
@@ -17,6 +23,7 @@
 #   FLEET_TOKEN=...                 # header auth for the n8n webhooks
 #   GITHUB_BRANCH=main              # optional
 #   FLEET_SKIP_COMPONENTS="a b"     # optional, components never to apply here
+#   FLEET_REQUESTS=0                # optional, never ask n8n for on-demand requests
 #
 # Usage:
 #   nm-fleet-agent            # check now, honouring the "check again after" time
@@ -28,13 +35,15 @@
 
 set -u -o pipefail
 
-AGENT_VERSION="1.0.1"
+AGENT_VERSION="1.1.0"
 
 # Fixed paths: the rm -rf lines below name these folders literally, so they
 # can never act on an empty or unexpected variable
 HOME_DIR="/netmatters/fleet-agent"
 CONF="${FLEET_CONF:-$HOME_DIR/fleet-agent.conf}"
 STATE_DIR="$HOME_DIR/state"
+ON_DEMAND_DIR="${FLEET_ON_DEMAND_DIR:-$HOME_DIR/on-demand}"
+LOG_DIR="${FLEET_LOG_DIR:-/netmatters/logs}"
 APPLY_ROOT="${FLEET_APPLY_ROOT:-/}"
 CRON_DIR="${FLEET_CRON_DIR:-/etc/cron.d}"
 LOCK_FILE="${FLEET_LOCK_FILE:-/run/nm-fleet-agent.lock}"
@@ -46,6 +55,9 @@ TEST_MODE="${FLEET_TEST:-0}"
 HEARTBEAT_SECONDS=86400
 RETRY_AFTER_FAILURE=3600
 KEEP_RELEASES=3
+ON_DEMAND_MAX=3          # requests run per check
+ON_DEMAND_MIN_GAP=900    # the same request at most once per 15 minutes
+ON_DEMAND_TIMEOUT=900    # each request gets 15 minutes
 
 log() {
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$STATE_DIR/agent.log"
@@ -65,20 +77,29 @@ n8n_post() {
     -H "X-Fleet-Token: $FLEET_TOKEN" "$@" "$N8N_BASE/webhook/$path"
 }
 
-# Root runs code and reads the token from these, so only root may change them
-root_only() {
+# True if only root can change each path
+is_root_only() {
   local p owner mode
   for p in "$@"; do
-    owner="$(stat -c '%u' "$p")"; mode="$(stat -c '%a' "$p")"
-    [ "$owner" = "0" ] || die "$p must be owned by root"
-    (( (8#$mode & 8#022) == 0 )) || die "$p must not be group or world writable"
+    owner="$(stat -c '%u' "$p" 2>/dev/null)" && mode="$(stat -c '%a' "$p" 2>/dev/null)" || return 1
+    [ "$owner" = "0" ] || return 1
+    (( (8#$mode & 8#022) == 0 )) || return 1
+  done
+  return 0
+}
+
+# Root runs code and reads the token from these, so only root may change them
+root_only() {
+  local p
+  for p in "$@"; do
+    is_root_only "$p" || die "$p must be owned by root and not group or world writable"
   done
 }
 
 load_config() {
   [ -r "$CONF" ] || die "$CONF not found - bootstrap this server first"
   [ "$TEST_MODE" = "1" ] || root_only /netmatters "$HOME_DIR" "$HOME_DIR/bin" "$CONF"
-  N8N_BASE="" GITHUB_REPO="" FLEET_TOKEN="" GITHUB_BRANCH="main" FLEET_SKIP_COMPONENTS=""
+  N8N_BASE="" GITHUB_REPO="" FLEET_TOKEN="" GITHUB_BRANCH="main" FLEET_SKIP_COMPONENTS="" FLEET_REQUESTS=1
   # shellcheck disable=SC1090
   . "$CONF"
   N8N_BASE="${N8N_BASE%/}"
@@ -238,6 +259,131 @@ install_release() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# On-demand requests
+#
+# A definition file /netmatters/fleet-agent/on-demand/<name> is shipped by a
+# component (under its files/), so it only exists where that component
+# applies. Its first line that isn't blank or a comment is the command: an
+# absolute path under /netmatters, then optional fixed arguments. It is run
+# directly, never through a shell, and only if root alone can change both
+# files. Nothing n8n sends is ever passed to the command.
+# ---------------------------------------------------------------------------
+
+# Request names this server can run, space-separated
+on_demand_available() {
+  local f names=""
+  for f in "$ON_DEMAND_DIR"/*; do
+    [ -f "$f" ] || continue
+    f="$(basename "$f")"
+    [[ "$f" =~ ^[a-z0-9-]+$ ]] && names="$names $f"
+  done
+  echo "${names# }"
+}
+
+# Sends what happened to a request. Never fails the run.
+request_result() {
+  local id="$1" name="$2" status="$3" message="$4" logfile="${5:-}" tail=""
+  [ -n "$logfile" ] && [ -f "$logfile" ] && tail="$(tail -n 40 "$logfile" | tail -c 4000)"
+  log "Request $id ($name): $status: $message"
+  n8n_post fleet-agent-request-result \
+    --data-urlencode "hostname=$(hostname)" \
+    --data-urlencode "fqdn=$(hostname -f 2>/dev/null || hostname)" \
+    --data-urlencode "request_id=$id" \
+    --data-urlencode "request=$name" \
+    --data-urlencode "status=$status" \
+    --data-urlencode "agent_version=$AGENT_VERSION" \
+    --data-urlencode "message=$message" \
+    --data-urlencode "log_tail=$tail" >/dev/null 2>&1 || log "Could not send the request result to n8n"
+}
+
+# Runs one request in the foreground, while the agent holds its lock, so it
+# never overlaps a release install
+run_on_demand() {
+  local id="$1" name="$2" def="$ON_DEMAND_DIR/$2" line="" cmd last now rc logfile
+  local -a argv=()
+  now="$(date +%s)"
+
+  if [ ! -f "$def" ]; then
+    request_result "$id" "$name" refused "Not available on this server (no on-demand definition for $name)"; return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    break
+  done < "$def"
+  read -r -a argv <<< "$line"
+  cmd="${argv[0]:-}"
+
+  if ! [[ "$cmd" =~ ^/netmatters/[A-Za-z0-9._/-]+$ ]] || [[ "$cmd" == *..* ]] || [ "${#argv[@]}" -gt 8 ]; then
+    request_result "$id" "$name" refused "Invalid command in $def"; return 0
+  fi
+  for line in "${argv[@]:1}"; do
+    [[ "$line" =~ ^[A-Za-z0-9._=/-]+$ ]] || { request_result "$id" "$name" refused "Invalid argument in $def"; return 0; }
+  done
+  if [ ! -f "$cmd" ] || [ ! -x "$cmd" ]; then
+    request_result "$id" "$name" refused "$cmd is missing or not executable"; return 0
+  fi
+  if [ "$TEST_MODE" != "1" ] && ! is_root_only "$ON_DEMAND_DIR" "$def" "$cmd"; then
+    request_result "$id" "$name" refused "$def and $cmd must be owned by root and not group or world writable"; return 0
+  fi
+
+  last="$(cat "$STATE_DIR/on-demand/$name.last" 2>/dev/null)"
+  if is_int "$last" && [ $((now - last)) -lt "$ON_DEMAND_MIN_GAP" ]; then
+    request_result "$id" "$name" skipped "Already ran in the last $((ON_DEMAND_MIN_GAP / 60)) minutes, try again later"; return 0
+  fi
+  echo "$now" > "$STATE_DIR/on-demand/$name.last"
+
+  mkdir -p "$LOG_DIR"
+  logfile="$LOG_DIR/$name-on-demand.log"
+  log "Running request $id ($name): ${argv[*]}"
+  rc=0
+  {
+    echo "== $(date -u +%FT%TZ) request $id: ${argv[*]}"
+    timeout "$ON_DEMAND_TIMEOUT" "${argv[@]}" < /dev/null || rc=$?
+    echo "== $(date -u +%FT%TZ) finished, exit $rc"
+  } > "$logfile" 2>&1
+  if [ "$rc" -eq 0 ]; then
+    request_result "$id" "$name" done "Finished" "$logfile"
+  elif [ "$rc" -eq 124 ]; then
+    request_result "$id" "$name" failed "Stopped after $ON_DEMAND_TIMEOUT seconds" "$logfile"
+  else
+    request_result "$id" "$name" failed "Exit $rc" "$logfile"
+  fi
+  return 0
+}
+
+# Asks n8n for on-demand requests. The reply is key=value lines:
+#   request=<id> <name>
+# with nothing at all when there's nothing to do. Never fails the run.
+check_requests() {
+  local resp k v id name n=0
+  [ "$FLEET_REQUESTS" = "0" ] && return 0
+  mkdir -p "$STATE_DIR/on-demand"
+  if ! resp="$(n8n_post fleet-agent-requests \
+        --data-urlencode "hostname=$(hostname)" \
+        --data-urlencode "fqdn=$(hostname -f 2>/dev/null || hostname)" \
+        --data-urlencode "agent_version=$AGENT_VERSION" \
+        --data-urlencode "available=$(on_demand_available)" 2>/dev/null)"; then
+    log "Could not ask n8n for requests"
+    return 0
+  fi
+  while IFS='=' read -r k v; do
+    [ "$k" = "request" ] || continue
+    v="${v%$'\r'}"
+    id="${v%% *}"; name="${v#* }"
+    if ! [[ "$id" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || ! [[ "$name" =~ ^[a-z0-9-]{1,64}$ ]]; then
+      log "Ignoring an invalid request line from n8n: ${v:0:100}"; continue
+    fi
+    n=$((n + 1))
+    if [ "$n" -gt "$ON_DEMAND_MAX" ]; then
+      request_result "$id" "$name" skipped "Too many requests at once, ask again"; continue
+    fi
+    run_on_demand "$id" "$name"
+  done <<< "$resp"
+  return 0
+}
+
 show_status() {
   echo "Agent version:     $AGENT_VERSION"
   echo "Installed release: $(installed_release)"
@@ -246,6 +392,7 @@ show_status() {
     echo "Waiting on:        release $cand, next ask $(date -d "@$when" 2>/dev/null || echo "$when")"
   fi
   [ -f "$STATE_DIR/last_heartbeat" ] && echo "Last check-in:     $(date -d "@$(cat "$STATE_DIR/last_heartbeat")" 2>/dev/null)"
+  echo "On-demand:         $(on_demand_available)"
   return 0
 }
 
@@ -273,6 +420,11 @@ main() {
   flock -n 9 || { log "Another run is in progress"; return 0; }
 
   load_config
+  mkdir -p "$STATE_DIR/on-demand"
+
+  # On-demand requests first: they must still work when GitHub can't be
+  # reached, and the release check below can stop the run early
+  check_requests
 
   local installed latest now hb_due=0 last_hb cand when resp
   local action="" rel="" sum="" again="" msg="" k v

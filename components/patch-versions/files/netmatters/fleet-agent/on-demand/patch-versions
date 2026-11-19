@@ -1,0 +1,4 @@
+# On-demand request "patch-versions": send this server's installed packages
+# and pending updates to n8n now, rather than waiting for the daily run.
+# Read by nm-fleet-agent; see "On-demand requests" in the repository README.
+/netmatters/patches/report-patch-versions.sh
