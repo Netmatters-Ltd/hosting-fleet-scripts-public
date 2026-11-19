@@ -36,6 +36,7 @@ Add these to `/netmatters/fleet-agent/fleet-agent.conf` as needed. Components do
 | Setting | Used by | Example |
 |---|---|---|
 | `FLEET_SKIP_COMPONENTS` | Agent | `"disk-space lynis-audit"` to never apply those components here |
+| `FLEET_REQUESTS` | Agent | `0` to stop the agent asking n8n for on-demand requests (such as Refresh packages) on this server |
 | `DISK_PATHS` | `disk-space` | `"/block_storage/home/*"` to override folder discovery |
 | `KERNELCARE_KEY` | `kernelcare` | The KernelCare licence key. The component only applies where this is set |
 | `NETDATA_CLAIM_TOKEN`, `NETDATA_CLAIM_ROOMS` | `netdata` | Netdata Cloud claim token and room ID. The component only applies where both are set |

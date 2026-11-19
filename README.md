@@ -30,6 +30,7 @@ A component can have:
 | `files/` | Copied onto `/` at the same paths, owned by root. Everything arrives as mode 0644; set real modes in `install.sh`. |
 | `install.sh` | Optional. Runs after the files are copied, as root, with a 10 minute limit. Must be safe to run again and again, and exit non-zero on failure. |
 | `cron/<name>` | Installed as `/etc/cron.d/netmatters-<name>`. Names: lower case letters, digits and dashes only. |
+| `files/netmatters/fleet-agent/on-demand/<name>` | Optional. Lets n8n ask for this job to run now (see below). |
 
 Each release is the **complete** set of components. Anything not in a release is removed where the agent manages it (its `netmatters-*` cron files), so dropping a component from `components/` stops its jobs everywhere.
 
@@ -42,6 +43,25 @@ Cron files are identical on every server, so use `nm-run` to spread the estate o
 ```
 
 `--daily`, `--weekly`, `--twice-monthly` or `--monthly`, plus `--spread <seconds>` of random-looking but fixed delay. The output of the last run is in `/netmatters/logs/<name>.log`. On a server, `nm-run --name <job> --monthly --show` prints when it runs there.
+
+## On-demand requests
+
+From agent 1.1.0, every run (every 15 minutes) also asks n8n whether anything has been requested for this server, such as **Refresh packages** on the Status page. n8n only ever sends a request ID and a name. The agent runs a name only if this server has a definition file for it, `/netmatters/fleet-agent/on-demand/<name>`, which a component ships under its `files/`, so it only exists where that component applies.
+
+The definition's first line that isn't blank or a comment is the command: an absolute path under `/netmatters`, then optional fixed arguments. For example, `patch-versions` ships:
+
+```
+/netmatters/patches/report-patch-versions.sh
+```
+
+The agent runs it directly (never through a shell), only if root alone can change the definition and the command, with nothing from n8n passed to it. So n8n still can't make a server run anything that didn't arrive in an approved release. Each request:
+
+- runs while the agent holds its lock, so never alongside a release install
+- runs at most once every 15 minutes per name, and for at most 15 minutes
+- logs to `/netmatters/logs/<name>-on-demand.log`
+- reports `done`, `failed`, `refused` or `skipped` back to n8n.
+
+To offer a new request, add the definition to a component, release it, and add the name and button label to `REQUESTS` in the Status page code (`n8n/code/status-request.js` and `status-page.js`). `nm-fleet-agent --status` lists the requests a server can run.
 
 ## Making a release
 
